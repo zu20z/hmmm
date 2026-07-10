@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Shield Box</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{
+    width:100%;height:100%;
+    background:#0c0c0e;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    overflow:hidden;
+  }
+  canvas{
+    display:block;
+    background:#0c0c0e;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="game" width="260" height="260"></canvas>
+
+<script>
+(function(){
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const CX = W/2, CY = H/2;
+
+  function fit(){
+    const scale = Math.min((window.innerWidth-20)/W, (window.innerHeight-20)/H, 3);
+    canvas.style.width = (W*scale)+'px';
+    canvas.style.height = (H*scale)+'px';
+  }
+  window.addEventListener('resize', fit);
+  fit();
+
+  const PLAYER_SIZE = 28; // 중앙 사각형 한 변 길이
+  const HALF = PLAYER_SIZE/2;
+  const ARROW_LEN = 16;
+  const MAX_HP = 10;
+  const TARGET_DIST = CX - HALF; // 정사각형 캔버스라 4방향 모두 동일
+  const REVERSAL_DIST = TARGET_DIST * 0.6; // 노란 화살표가 방향을 바꾸는 지점
+
+  const SPEED = { blue: 80, red: 165, yellow: 115 };
+  const COLOR = { blue: '#4d8dff', red: '#ff4d4d', yellow: '#ffd93d' };
+  const SIDES = ['up','down','left','right'];
+
+  let hp, arrows, shieldDir, elapsed, lastSpawn, spawnGap, lastT, running, started, over;
+
+  function reset(){
+    hp = MAX_HP;
+    arrows = [];
+    shieldDir = 'up';
+    elapsed = 0;
+    lastSpawn = 0;
+    spawnGap = 1.0;
+    over = false;
+  }
+
+  function oppositeSide(side){
+    return { up:'down', down:'up', left:'right', right:'left' }[side];
+  }
+
+  // 이 화살표가 최종적으로 어느 방향에서 판정될지 (노란 화살표는 반전 전엔 반대쪽이 최종 방향)
+  function threatSide(a){
+    if(a.type !== 'yellow') return a.side;
+    return a.phase === 'approach2' ? a.side : oppositeSide(a.side);
+  }
+
+  function pickType(){
+    const r = Math.random();
+    if(r < 0.45) return 'blue';
+    if(r < 0.8) return 'red';
+    return 'yellow';
+  }
+
+  // side: 화살표가 현재 진행 중인 물리적 방향(=출발한 쪽)
+  function spawnArrow(){
+    // 이미 날아오고 있는 화살표들과 방향이 겹치면(다른 방향이면) 동시 판정으로 무조건 맞는 상황이
+    // 생기지 않도록, 기존에 진행 중인 위협 방향이 있으면 그 방향으로만 추가 스폰한다.
+    const activeThreats = new Set(arrows.map(threatSide));
+    let side;
+    if(activeThreats.size === 0){
+      side = SIDES[Math.floor(Math.random()*SIDES.length)];
+    } else if(activeThreats.size === 1){
+      side = [...activeThreats][0];
+    } else {
+      return; // 이미 서로 다른 두 방향의 위협이 있으면(발생하지 않아야 정상) 스폰 보류
+    }
+    const type = pickType();
+    arrows.push({ side, type, dist: 0, speed: SPEED[type], phase: 'approach1' });
+  }
+
+  function arrowPos(a){
+    const travelled = Math.min(Math.max(a.dist,0), TARGET_DIST);
+    let x, y, angle;
+    if(a.side==='up'){ x=CX; y=travelled; angle=Math.PI/2; }
+    else if(a.side==='down'){ x=CX; y=H-travelled; angle=-Math.PI/2; }
+    else if(a.side==='left'){ x=travelled; y=CY; angle=0; }
+    else { x=W-travelled; y=CY; angle=Math.PI; }
+    if(a.type==='yellow' && a.phase==='retreat') angle += Math.PI; // 되돌아가는 방향으로 화살표 반전
+    return { x, y, angle };
+  }
+
+  function resolveHit(a){
+    if(a.side !== shieldDir){
+      hp -= 1;
+    }
+  }
+
+  function update(dt){
+    if(over) return;
+    elapsed += dt;
+
+    spawnGap = Math.max(0.55, 1.05 - elapsed*0.008);
+    lastSpawn += dt;
+    if(lastSpawn >= spawnGap){
+      lastSpawn = 0;
+      spawnArrow();
+    }
+
+    for(let i = arrows.length-1; i >= 0; i--){
+      const a = arrows[i];
+      if(a.type !== 'yellow'){
+        a.dist += a.speed * dt;
+        if(a.dist >= TARGET_DIST){
+          resolveHit(a);
+          arrows.splice(i,1);
+          if(hp <= 0){ gameOver(); return; }
+        }
+      } else {
+        if(a.phase === 'approach1'){
+          a.dist += a.speed * dt;
+          if(a.dist >= REVERSAL_DIST){
+            a.dist = REVERSAL_DIST;
+            a.phase = 'retreat';
+          }
+        } else if(a.phase === 'retreat'){
+          a.dist -= a.speed * dt;
+          if(a.dist <= 0){
+            a.dist = 0;
+            a.side = oppositeSide(a.side);
+            a.phase = 'approach2';
+          }
+        } else {
+          a.dist += a.speed * dt;
+          if(a.dist >= TARGET_DIST){
+            resolveHit(a);
+            arrows.splice(i,1);
+            if(hp <= 0){ gameOver(); return; }
+          }
+        }
+      }
+    }
+  }
+
+  function drawArrowShape(x,y,angle,color){
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.rotate(angle);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(ARROW_LEN/2, 0);
+    ctx.lineTo(-ARROW_LEN/2, ARROW_LEN/2.4);
+    ctx.lineTo(-ARROW_LEN/2, -ARROW_LEN/2.4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    ctx.strokeStyle = '#2a2a2e';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(1,1,W-2,H-2);
+
+    // 화살표
+    arrows.forEach(a => {
+      const p = arrowPos(a);
+      drawArrowShape(p.x, p.y, p.angle, COLOR[a.type]);
+    });
+
+    // 플레이어 사각형
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(CX-HALF, CY-HALF, PLAYER_SIZE, PLAYER_SIZE);
+    ctx.fillStyle = '#1a1a1d';
+    ctx.fillRect(CX-HALF, CY-HALF, PLAYER_SIZE, PLAYER_SIZE);
+
+    // 방어막 (노란 화살표와 헷갈리지 않도록 하늘색 사용)
+    ctx.strokeStyle = '#4fd1c5';
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    const m = 4; // 사각형 변에서 살짝 띄움
+    ctx.beginPath();
+    if(shieldDir==='up'){
+      ctx.moveTo(CX-HALF-m, CY-HALF-m); ctx.lineTo(CX+HALF+m, CY-HALF-m);
+    } else if(shieldDir==='down'){
+      ctx.moveTo(CX-HALF-m, CY+HALF+m); ctx.lineTo(CX+HALF+m, CY+HALF+m);
+    } else if(shieldDir==='left'){
+      ctx.moveTo(CX-HALF-m, CY-HALF-m); ctx.lineTo(CX-HALF-m, CY+HALF+m);
+    } else {
+      ctx.moveTo(CX+HALF+m, CY-HALF-m); ctx.lineTo(CX+HALF+m, CY+HALF+m);
+    }
+    ctx.stroke();
+
+    // HUD
+    ctx.font = '12px monospace';
+    ctx.fillStyle = '#f2c94c';
+    ctx.textAlign = 'left';
+    ctx.fillText('HP ' + Math.max(0,hp) + '/' + MAX_HP, 8, H-8);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#9aa0a8';
+    ctx.fillText(elapsed.toFixed(1) + 's', W-8, H-8);
+  }
+
+  function drawMessage(lines){
+    ctx.clearRect(0,0,W,H);
+    ctx.strokeStyle = '#2a2a2e';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(1,1,W-2,H-2);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 15px monospace';
+    ctx.fillText(lines[0], W/2, H/2 - 6);
+    ctx.font = '11px monospace';
+    ctx.fillStyle = '#9aa0a8';
+    ctx.fillText(lines[1], W/2, H/2 + 16);
+  }
+
+  function loop(t){
+    if(!lastT) lastT = t;
+    let dt = (t - lastT)/1000;
+    lastT = t;
+    dt = Math.min(dt, 0.05);
+    if(!started){
+      drawMessage(['SHIELD BOX', 'SPACE 를 눌러 시작']);
+    } else if(running && !over){
+      update(dt);
+      draw();
+    }
+    requestAnimationFrame(loop);
+  }
+
+  function gameOver(){
+    running = false;
+    over = true;
+    setTimeout(() => {
+      drawMessage(['GAME OVER  ' + elapsed.toFixed(1) + 's', 'SPACE 를 눌러 재시작']);
+    }, 300);
+  }
+
+  function start(){
+    reset();
+    running = true;
+    started = true;
+    lastT = 0;
+  }
+
+  document.addEventListener('keydown', (e) => {
+    switch(e.key){
+      case 'ArrowUp': case 'w': case 'W': shieldDir = 'up'; e.preventDefault(); break;
+      case 'ArrowDown': case 's': case 'S': shieldDir = 'down'; e.preventDefault(); break;
+      case 'ArrowLeft': case 'a': case 'A': shieldDir = 'left'; e.preventDefault(); break;
+      case 'ArrowRight': case 'd': case 'D': shieldDir = 'right'; e.preventDefault(); break;
+      case ' ':
+        if(!started || over) start();
+        e.preventDefault();
+        break;
+    }
+  });
+
+  started = false;
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+
+</body>
+</html>
